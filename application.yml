@@ -1,0 +1,124 @@
+# src/main/resources/application.yml
+spring:
+  application:
+    name: entitlement-service
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+
+server:
+  port: 8080
+  servlet:
+    context-path: /entitlement-service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,configprops
+  endpoint:
+    health:
+      show-details: when-authorized
+  info:
+    env:
+      enabled: true
+
+logging:
+  level:
+    com.company.entitlement: INFO
+    org.springframework.vault: WARN
+    redis.clients.jedis: WARN
+
+---
+# src/main/resources/application-dev.yml
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+vault:
+  enabled: false
+
+# Fallback configuration when vault is disabled
+enableredis: no
+cache:
+  ttlSeconds: 1800
+  maxRetries: 2
+
+redis:
+  host: localhost
+  port: 6379
+  password: 
+  timeout: 2000
+  retry-count: 2
+  pool:
+    max-active: 10
+    max-idle: 5
+    min-idle: 2
+    max-wait: 2000
+
+logging:
+  level:
+    com.company.entitlement: DEBUG
+    org.springframework.vault: DEBUG
+
+---
+# src/main/resources/application-prod.yml
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+vault:
+  enabled: true
+  provider: ${VAULT_PROVIDER:hashicorp}
+  cache-config-path: secret/entitlement-service/cache-config
+  redis-config-path: secret/entitlement-service/redis-config
+  refresh-interval-minutes: 30
+  hashicorp:
+    uri: ${VAULT_URI:https://vault.company.com:8200}
+    token: ${VAULT_TOKEN:}
+    role-id: ${VAULT_ROLE_ID:}
+    secret-id: ${VAULT_SECRET_ID:}
+    namespace: ${VAULT_NAMESPACE:entitlement-service}
+  aws:
+    region: ${AWS_REGION:us-east-1}
+    access-key: ${AWS_ACCESS_KEY_ID:}
+    secret-key: ${AWS_SECRET_ACCESS_KEY:}
+    session-token: ${AWS_SESSION_TOKEN:}
+  azure:
+    vault-url: ${AZURE_VAULT_URL:}
+    client-id: ${AZURE_CLIENT_ID:}
+    client-secret: ${AZURE_CLIENT_SECRET:}
+    tenant-id: ${AZURE_TENANT_ID:}
+
+logging:
+  level:
+    com.company.entitlement: INFO
+    vault: WARN
+    aws: WARN
+    azure: WARN
+
+---
+# src/main/resources/application-test.yml
+spring:
+  config:
+    activate:
+      on-profile: test
+
+vault:
+  enabled: false
+
+enableredis: no
+cache:
+  ttlSeconds: 300
+  maxRetries: 1
+
+redis:
+  host: localhost
+  port: 6370
+  timeout: 1000
+
+logging:
+  level:
+    com.company.entitlement: DEBUG
+    org.springframework.vault: OFF
