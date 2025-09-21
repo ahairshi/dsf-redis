@@ -1,13 +1,18 @@
 // Configuration Class
 @Configuration
-@EnableConfigurationProperties(RedisConfigProperties.class)
+@EnableConfigurationProperties({RedisConfigProperties.class, CacheConfigProperties.class})
+@PropertySource("classpath:cache-config.properties")
 public class RedisConfig {
     
     @Autowired
     private RedisConfigProperties redisProperties;
     
     @Bean
-    @ConditionalOnProperty(name = "cache.redis.enabled", havingValue = "true")
+    @ConditionalOnProperty(
+        name = "enableredis", 
+        havingValue = "yes", 
+        matchIfMissing = false
+    )
     public JedisPool jedisPool() {
         JedisPoolConfig poolConfig = new JedisPoolConfig();
         poolConfig.setMaxTotal(redisProperties.getPool().getMaxActive());
@@ -26,17 +31,31 @@ public class RedisConfig {
     }
     
     @Bean
-    @ConditionalOnProperty(name = "cache.redis.enabled", havingValue = "false", matchIfMissing = true)
+    @ConditionalOnProperty(
+        name = "enableredis", 
+        havingValue = "no", 
+        matchIfMissing = true
+    )
     public Map<String, Object> localCache() {
         return new ConcurrentHashMap<>();
     }
 }
 
+// Cache Configuration Properties
+@ConfigurationProperties(prefix = "cache")
+@PropertySource("classpath:cache-config.properties")
+@Data
+public class CacheConfigProperties {
+    private String enableredis = "no";
+    private int ttlSeconds = 3600;
+    private int maxRetries = 3;
+}
+
 // Properties Configuration
-@ConfigurationProperties(prefix = "cache.redis")
+@ConfigurationProperties(prefix = "redis")
+@PropertySource("classpath:cache-config.properties")
 @Data
 public class RedisConfigProperties {
-    private boolean enabled = false;
     private String host = "localhost";
     private int port = 6379;
     private String password;
@@ -84,17 +103,21 @@ public interface CacheService {
 
 // Redis Cache Implementation
 @Service
-@ConditionalOnProperty(name = "cache.redis.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "enableredis", havingValue = "yes")
 @Slf4j
 public class RedisCacheService implements CacheService {
     
     private final JedisPool jedisPool;
     private final ObjectMapper objectMapper;
     private final RedisConfigProperties redisProperties;
+    private final CacheConfigProperties cacheProperties;
     
-    public RedisCacheService(JedisPool jedisPool, RedisConfigProperties redisProperties) {
+    public RedisCacheService(JedisPool jedisPool, 
+                           RedisConfigProperties redisProperties,
+                           CacheConfigProperties cacheProperties) {
         this.jedisPool = jedisPool;
         this.redisProperties = redisProperties;
+        this.cacheProperties = cacheProperties;
         this.objectMapper = new ObjectMapper();
         this.objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     }
@@ -113,7 +136,7 @@ public class RedisCacheService implements CacheService {
     @Override
     public <T> T get(String key, Class<T> clazz) {
         int retryCount = 0;
-        while (retryCount < redisProperties.getRetryCount()) {
+        while (retryCount < cacheProperties.getMaxRetries()) {
             try (Jedis jedis = jedisPool.getResource()) {
                 String jsonValue = jedis.get(key);
                 if (jsonValue != null) {
@@ -125,9 +148,9 @@ public class RedisCacheService implements CacheService {
             } catch (JedisConnectionException | SocketTimeoutException e) {
                 retryCount++;
                 log.warn("Redis connection timeout/error for key: {}, retry: {}/{}", 
-                    key, retryCount, redisProperties.getRetryCount(), e);
+                    key, retryCount, cacheProperties.getMaxRetries(), e);
                 
-                if (retryCount >= redisProperties.getRetryCount()) {
+                if (retryCount >= cacheProperties.getMaxRetries()) {
                     log.error("Max retries exceeded for Redis get operation, key: {}", key);
                     throw new CacheException("Redis operation failed after retries", e);
                 }
@@ -169,7 +192,7 @@ public class RedisCacheService implements CacheService {
 
 // Local Cache Implementation (fallback)
 @Service
-@ConditionalOnProperty(name = "cache.redis.enabled", havingValue = "false", matchIfMissing = true)
+@ConditionalOnProperty(name = "enableredis", havingValue = "no", matchIfMissing = true)
 @Slf4j
 public class LocalCacheService implements CacheService {
     
@@ -273,23 +296,21 @@ public class EntitlementBackendServiceImpl implements EntitlementBackendService 
     }
 }
 
-// Main Service
+// Main Service with Vault Support
 @Service
 @Slf4j
 public class EntitlementService {
     
     private final CacheService cacheService;
     private final EntitlementBackendService backendService;
-    private final RedisConfigProperties redisProperties;
-    
-    private static final int CACHE_TTL_SECONDS = 3600; // 1 hour
+    private final VaultAwareCacheProperties vaultAwareCacheProperties;
     
     public EntitlementService(CacheService cacheService, 
                             EntitlementBackendService backendService,
-                            RedisConfigProperties redisProperties) {
+                            VaultAwareCacheProperties vaultAwareCacheProperties) {
         this.cacheService = cacheService;
         this.backendService = backendService;
-        this.redisProperties = redisProperties;
+        this.vaultAwareCacheProperties = vaultAwareCacheProperties;
     }
     
     public EntitlementResponse getEntitlements(String username, String ibd, String productCode) {
@@ -299,7 +320,7 @@ public class EntitlementService {
         log.info("Getting entitlements for user: {}, IBD: {}, product: {}", username, ibd, productCode);
         
         // Check cache first if Redis is enabled
-        if (redisProperties.isEnabled()) {
+        if ("yes".equalsIgnoreCase(vaultAwareCacheProperties.getEnableRedis())) {
             try {
                 EntitlementResponse cachedResponse = cacheService.get(cacheKey, EntitlementResponse.class);
                 if (cachedResponse != null) {
@@ -318,9 +339,9 @@ public class EntitlementService {
         EntitlementResponse response = backendService.fetchEntitlements(request);
         
         // Cache the response if Redis is enabled and fetch was successful
-        if (redisProperties.isEnabled() && response != null) {
+        if ("yes".equalsIgnoreCase(vaultAwareCacheProperties.getEnableRedis()) && response != null) {
             try {
-                cacheService.put(cacheKey, response, CACHE_TTL_SECONDS);
+                cacheService.put(cacheKey, response, vaultAwareCacheProperties.getTtlSeconds());
                 log.info("Entitlements cached for key: {}", cacheKey);
             } catch (Exception e) {
                 log.error("Failed to cache entitlements for key: {}", cacheKey, e);
